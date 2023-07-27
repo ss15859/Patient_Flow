@@ -9,11 +9,12 @@ import numpy as np
 import pandas as pd
 import seaborn as sns
 import tensorflow as tf
+tf.random.set_seed(0)
 
 
 
 class WindowGenerator():
-	def __init__(self, input_width, label_width, shift,
+	def __init__(self, input_width, label_width,
 			   train_df, val_df, test_df,
 			   label_columns=None):
 	# Store the raw data.
@@ -32,9 +33,9 @@ class WindowGenerator():
 		# Work out the window parameters.
 		self.input_width = input_width
 		self.label_width = label_width
-		self.shift = shift
+		self.shift = label_width
 
-		self.total_window_size = input_width + shift
+		self.total_window_size = input_width + self.shift
 
 		self.input_slice = slice(0, input_width)
 		self.input_indices = np.arange(self.total_window_size)[self.input_slice]
@@ -67,7 +68,7 @@ class WindowGenerator():
 
 
 
-	def plot(self, model=None, plot_col='Number of Patients', max_subplots=10):
+	def plot(self, model=None, plot_col='Number of Patients', max_subplots=4):
 		
 		inputs, labels = self.example
 		plt.figure(figsize=(12, 20))
@@ -77,7 +78,7 @@ class WindowGenerator():
 			plt.subplot(max_n, 1, n+1)
 			plt.ylabel(f'{plot_col}')
 			plt.plot(self.input_indices, inputs[n, :, plot_col_index],
-			         label='Inputs', marker='.', zorder=-10)
+					 label='Inputs', marker='.', zorder=-10)
 
 			if self.label_columns:
 			  label_col_index = self.label_columns_indices.get(plot_col, None)
@@ -88,26 +89,26 @@ class WindowGenerator():
 			  continue
 
 			plt.scatter(self.label_indices, labels[n, :, label_col_index],
-			            edgecolors='k', label='Labels', c='#2ca02c', s=64)
+						edgecolors='k', label='Observed', c='#2ca02c', s=64)
 			if model is not None:
 			  predictions = model(inputs)
-			  plt.scatter(self.label_indices, predictions[n, :, label_col_index],
-			              marker='X', edgecolors='k', label='Predictions',
-			              c='#ff7f0e', s=64)
+			  plt.scatter(self.label_indices, predictions[n, :],
+						  marker='X', edgecolors='k', label='Predictions',
+						  c='#ff7f0e', s=64)
 
 			if n == 0:
 			  plt.legend()
 
-		plt.xlabel('Time [h]')
+		# plt.xlabel('Time [h]')
 
-	def make_dataset(self, data):
+	def make_dataset(self, data,shuffle,seq_stride=1):
 		data = np.array(data, dtype=np.float32)
 		ds = tf.keras.utils.timeseries_dataset_from_array(
 		  data=data,
 		  targets=None,
 		  sequence_length=self.total_window_size,
-		  sequence_stride=1,
-		  shuffle=True,
+		  sequence_stride=seq_stride,
+		  shuffle=shuffle,
 		  batch_size=32,)
 
 		ds = ds.map(self.split_window)
@@ -116,15 +117,15 @@ class WindowGenerator():
 
 	@property
 	def train(self):
-		return self.make_dataset(self.train_df)
+		return self.make_dataset(self.train_df,shuffle=True)
 
 	@property
 	def val(self):
-		return self.make_dataset(self.val_df)
+		return self.make_dataset(self.val_df,shuffle=True)
 
 	@property
 	def test(self):
-	 	return self.make_dataset(self.test_df)
+		return self.make_dataset(self.test_df,shuffle=False,seq_stride= self.label_width)
 
 	@property
 	def example(self):
@@ -141,28 +142,85 @@ class WindowGenerator():
 
 
 
-def compile_and_fit(model, window, patience=200,MAX_EPOCHS=1000):
-	early_stopping = tf.keras.callbacks.EarlyStopping(monitor='val_loss',
-	                                            patience=patience,
-	                                            mode='min',
-	                                            restore_best_weights=True)
+# def compile_and_fit(model, window, patience=200,MAX_EPOCHS=1000):
+# 	early_stopping = tf.keras.callbacks.EarlyStopping(monitor='val_loss',
+# 												patience=patience,
+# 												mode='min',
+# 												restore_best_weights=True)
 
-	checkpoint = tf.keras.callbacks.ModelCheckpoint('best_model.ckpt', 
-                    monitor="val_loss", mode="min", 
-                    save_best_only=True, verbose=0)
+# 	checkpoint_name = 'best_model_numfeatures='+str(window.example[0].shape[2])+'.ckpt'
 
-	model.compile(loss=tf.keras.losses.MeanSquaredError(),
-	        optimizer=tf.keras.optimizers.Adam(),
-	        metrics=[tf.keras.metrics.MeanAbsoluteError()])
+# 	checkpoint = tf.keras.callbacks.ModelCheckpoint(checkpoint_name, 
+# 					monitor="val_loss", mode="min", 
+# 					save_best_only=True, verbose=0)
 
-	history = model.fit(window.train, epochs=MAX_EPOCHS,
-	              validation_data=window.val,
-	              callbacks=[early_stopping,checkpoint])
+# 	model.compile(loss=tf.keras.losses.MeanSquaredError(),
+# 			optimizer=tf.keras.optimizers.Adam(),
+# 			metrics=[tf.keras.metrics.MeanAbsoluteError(),
+# 			tf.keras.metrics.MeanAbsolutePercentageError(),
+# 			tf.keras.losses.MeanSquaredError()])
 
-	model.load_weights('best_model.ckpt')
+# 	history = model.fit(window.train, epochs=MAX_EPOCHS,
+# 				  validation_data=window.val,
+# 				  callbacks=[early_stopping,checkpoint])
 
-	return history
+# 	model.load_weights(checkpoint_name)
+
+# 	return history
 
 
 
-# WindowGenerator.split_window = split_window
+class lstm(tf.keras.Model):
+
+
+	def __init__(self,input_width,label_width,input_features=1):
+
+		super().__init__() 
+		self.IN_STEPS = input_width
+		self.OUT_STEPS = label_width
+		self.input_features = input_features
+
+
+		self.compile(loss=tf.keras.losses.MeanSquaredError(),
+			optimizer=tf.keras.optimizers.Adam(),
+			metrics=[tf.keras.metrics.MeanAbsoluteError()])
+
+		self.lstm_layer = tf.keras.layers.LSTM(64, return_sequences=False)
+		self.dense_layer = tf.keras.layers.Dense(self.OUT_STEPS,
+						  kernel_initializer=tf.initializers.zeros())
+
+
+	def call(self,inputs):
+
+		output_LSTM = self.lstm_layer(inputs)
+		outputs = self.dense_layer(output_LSTM)
+
+		return outputs
+	
+	def fit(self,train_input,val_input):
+
+		early_stopping = tf.keras.callbacks.EarlyStopping(monitor='val_loss',
+											patience=2000,
+											mode='min',
+											restore_best_weights=True)
+
+		checkpoint_name = 'checkpoints/best_model_numfeatures='+str(self.input_features)+' output_width=' +str(self.OUT_STEPS) +'.ckpt'
+
+		checkpoint = tf.keras.callbacks.ModelCheckpoint(checkpoint_name, 
+					monitor="val_loss", mode="min", 
+					save_best_only=True, verbose=0)
+
+		history = super(lstm, self).fit(train_input,epochs=2000,
+				  validation_data=val_input,
+				  callbacks=[early_stopping,checkpoint])
+
+		self.load_weights(checkpoint_name)
+
+		return history
+
+
+
+
+
+
+
